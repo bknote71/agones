@@ -1262,3 +1262,79 @@ func newFakeController() (*Controller, agtesting.Mocks) {
 func newFakeExtensions() *Extensions {
 	return NewExtensions(generic.New(), webhooks.NewWebHook(http.NewServeMux()))
 }
+
+func unhealthyBeforeReadyGameServer(failedAt time.Time) *agonesv1.GameServer {
+	return &agonesv1.GameServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				agonesv1.GameServerUnhealthyBeforeReadyAtAnnotation: failedAt.UTC().Format(time.RFC3339),
+			},
+		},
+		Status: agonesv1.GameServerStatus{State: agonesv1.GameServerStateUnhealthy},
+	}
+}
+
+func TestComputeReconciliationActionUnhealthyBeforeReady(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	compute := func(list []*agonesv1.GameServer, replicas int) (int, []*agonesv1.GameServer) {
+		toAdd, toDelete, _ := computeReconciliationAction(apis.Distributed, list, map[string]gameservers.NodeCount{},
+			replicas, 1000, 1000, 1000, nil)
+		return toAdd, toDelete
+	}
+
+	t.Run("held while within the delay", func(t *testing.T) {
+		list := []*agonesv1.GameServer{unhealthyBeforeReadyGameServer(now), gsWithState(agonesv1.GameServerStateReady)}
+		toAdd, toDelete := compute(list, 2)
+		assert.Equal(t, 0, toAdd)
+		assert.Empty(t, toDelete)
+	})
+
+	t.Run("replaced once the delay has passed", func(t *testing.T) {
+		list := []*agonesv1.GameServer{
+			unhealthyBeforeReadyGameServer(now.Add(-gameServerUnhealthyBeforeReadyDeletionDelay - time.Second)),
+			gsWithState(agonesv1.GameServerStateReady),
+		}
+		toAdd, toDelete := compute(list, 2)
+		assert.Equal(t, 1, toAdd)
+		assert.Equal(t, []*agonesv1.GameServer{list[0]}, toDelete)
+	})
+
+	t.Run("Unhealthy after Ready is replaced straight away", func(t *testing.T) {
+		list := []*agonesv1.GameServer{gsWithState(agonesv1.GameServerStateUnhealthy)}
+		toAdd, toDelete := compute(list, 1)
+		assert.Equal(t, 1, toAdd)
+		assert.Len(t, toDelete, 1)
+	})
+
+	t.Run("held GameServers are removed on scale down", func(t *testing.T) {
+		list := []*agonesv1.GameServer{unhealthyBeforeReadyGameServer(now), unhealthyBeforeReadyGameServer(now)}
+		toAdd, toDelete := compute(list, 0)
+		assert.Equal(t, 0, toAdd)
+		assert.Len(t, toDelete, 2)
+	})
+}
+
+func TestNextUnhealthyBeforeReadyDeletion(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().Truncate(time.Second)
+	deleted := unhealthyBeforeReadyGameServer(now)
+	deleted.Status.State = agonesv1.GameServerStateShutdown
+
+	list := []*agonesv1.GameServer{
+		gsWithState(agonesv1.GameServerStateReady),
+		gsWithState(agonesv1.GameServerStateUnhealthy),
+		unhealthyBeforeReadyGameServer(now.Add(-time.Second)),
+		unhealthyBeforeReadyGameServer(now.Add(-3 * time.Second)),
+		deleted,
+	}
+
+	next, ok := nextUnhealthyBeforeReadyDeletion(list, now)
+	assert.True(t, ok)
+	assert.Equal(t, gameServerUnhealthyBeforeReadyDeletionDelay-3*time.Second, next)
+
+	_, ok = nextUnhealthyBeforeReadyDeletion(list, now.Add(gameServerUnhealthyBeforeReadyDeletionDelay))
+	assert.False(t, ok)
+}

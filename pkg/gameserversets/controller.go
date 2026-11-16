@@ -62,6 +62,9 @@ const (
 	// gameServerErrorDeletionDelay is the minimum amount of time to delay the deletion
 	// of a GameServer in Error state.
 	gameServerErrorDeletionDelay = 30 * time.Second
+	// gameServerUnhealthyBeforeReadyDeletionDelay is the minimum amount of time to delay the deletion
+	// of a GameServer that became Unhealthy before it was ever Ready.
+	gameServerUnhealthyBeforeReadyDeletionDelay = 5 * time.Second
 )
 
 // Extensions struct contains what is needed to bind webhook handlers
@@ -320,6 +323,11 @@ func (c *Controller) syncGameServerSet(ctx context.Context, key string) error {
 
 	list = c.stateCache.forGameServerSet(gsSet).reconcileWithUpdatedServerList(list)
 
+	if next, ok := nextUnhealthyBeforeReadyDeletion(list, time.Now()); ok {
+		// Nothing else is guaranteed to trigger a sync at the moment a held GameServer is due to be replaced.
+		c.workerqueue.EnqueueAfter(gsSet, next)
+	}
+
 	numServersToAdd, toDelete, isPartial := computeReconciliationAction(gsSet.Spec.Scheduling, list, c.counter.Counts(),
 		int(gsSet.Spec.Replicas), c.maxGameServerCreationsPerBatch, c.maxGameServerDeletionsPerBatch, c.maxPodPendingCount, gsSet.Spec.Priorities)
 
@@ -460,7 +468,13 @@ func computeReconciliationAction(strategy apis.SchedulingStrategy, list []*agone
 			}
 
 		case agonesv1.GameServerStateUnhealthy:
-			scheduleDeletion(gs)
+			if unhealthyBeforeReadyDeletionRemaining(gs, time.Now()) > 0 {
+				// It failed before it was ever Ready, so its replacement would most likely fail the same way.
+				// Count it as up until the delay has passed, rather than recreating it in a tight loop.
+				handleGameServerUp(gs)
+			} else {
+				scheduleDeletion(gs)
+			}
 		default:
 			// unrecognized state, assume it's up.
 			handleGameServerUp(gs)
@@ -516,6 +530,39 @@ func shouldDeleteErroredGameServer(gs *agonesv1.GameServer) bool {
 		return true
 	}
 	return false
+}
+
+// unhealthyBeforeReadyDeletionRemaining returns how much longer a GameServer that became Unhealthy
+// before it was ever Ready should be kept before it is replaced. Zero or less means it should be replaced now.
+func unhealthyBeforeReadyDeletionRemaining(gs *agonesv1.GameServer, now time.Time) time.Duration {
+	if gs.Status.State != agonesv1.GameServerStateUnhealthy {
+		return 0
+	}
+	failedAtStr := gs.ObjectMeta.Annotations[agonesv1.GameServerUnhealthyBeforeReadyAtAnnotation]
+	if failedAtStr == "" {
+		return 0
+	}
+	failedAt, err := time.Parse(time.RFC3339, failedAtStr)
+	if err != nil {
+		return 0
+	}
+	return failedAt.Add(gameServerUnhealthyBeforeReadyDeletionDelay).Sub(now)
+}
+
+// nextUnhealthyBeforeReadyDeletion returns the time until the first held GameServer in the list is due to be replaced.
+func nextUnhealthyBeforeReadyDeletion(list []*agonesv1.GameServer, now time.Time) (time.Duration, bool) {
+	var next time.Duration
+	found := false
+	for _, gs := range list {
+		if gs.IsBeingDeleted() {
+			continue
+		}
+		if remaining := unhealthyBeforeReadyDeletionRemaining(gs, now); remaining > 0 && (!found || remaining < next) {
+			next = remaining
+			found = true
+		}
+	}
+	return next, found
 }
 
 // addMoreGameServers adds diff more GameServers to the set

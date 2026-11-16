@@ -16,6 +16,7 @@ package gameservers
 
 import (
 	"testing"
+	"time"
 
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	agtesting "agones.dev/agones/pkg/testing"
@@ -270,4 +271,32 @@ func TestIsBeforePodCreated(t *testing.T) {
 			assert.Equal(t, v.expected, isBeforePodCreated(gs))
 		})
 	}
+}
+
+func TestApplyUnhealthyState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("before Ready", func(t *testing.T) {
+		for _, state := range []agonesv1.GameServerState{agonesv1.GameServerStatePortAllocation, agonesv1.GameServerStateCreating,
+			agonesv1.GameServerStateStarting, agonesv1.GameServerStateScheduled, agonesv1.GameServerStateRequestReady} {
+			gs := &agonesv1.GameServer{Status: agonesv1.GameServerStatus{State: state}}
+			applyUnhealthyState(gs)
+
+			assert.Equal(t, agonesv1.GameServerStateUnhealthy, gs.Status.State)
+			failedAt, err := time.Parse(time.RFC3339, gs.ObjectMeta.Annotations[agonesv1.GameServerUnhealthyBeforeReadyAtAnnotation])
+			require.NoError(t, err, state)
+			assert.WithinDuration(t, time.Now(), failedAt, 5*time.Second)
+		}
+	})
+
+	t.Run("after Ready", func(t *testing.T) {
+		for _, state := range []agonesv1.GameServerState{agonesv1.GameServerStateReady, agonesv1.GameServerStateReserved,
+			agonesv1.GameServerStateAllocated} {
+			gs := &agonesv1.GameServer{Status: agonesv1.GameServerStatus{State: state}}
+			applyUnhealthyState(gs)
+
+			assert.Equal(t, agonesv1.GameServerStateUnhealthy, gs.Status.State)
+			assert.NotContains(t, gs.ObjectMeta.Annotations, agonesv1.GameServerUnhealthyBeforeReadyAtAnnotation)
+		}
+	})
 }

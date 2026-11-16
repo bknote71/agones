@@ -16,6 +16,7 @@ package gameservers
 
 import (
 	"net"
+	"time"
 
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	"agones.dev/agones/pkg/util/errors"
@@ -46,6 +47,19 @@ const (
 // and failed syncs still retry with backoff through the workerqueue.
 func newStateUpdateLimiter() *rate.Limiter {
 	return rate.NewLimiter(stateUpdateRate, stateUpdateBurst)
+}
+
+// applyUnhealthyState moves the GameServer to Unhealthy. If it was never Ready, it also records when
+// that happened, so that the GameServerSet controller can back off replacing GameServers that keep
+// failing before they become usable.
+func applyUnhealthyState(gs *agonesv1.GameServer) {
+	if gs.IsBeforeReady() {
+		if gs.ObjectMeta.Annotations == nil {
+			gs.ObjectMeta.Annotations = map[string]string{}
+		}
+		gs.ObjectMeta.Annotations[agonesv1.GameServerUnhealthyBeforeReadyAtAnnotation] = time.Now().UTC().Format(time.RFC3339)
+	}
+	gs.Status.State = agonesv1.GameServerStateUnhealthy
 }
 
 // isGameServerPod returns if this Pod is a Pod that comes from a GameServer
