@@ -284,7 +284,7 @@ func (hc *HealthController) syncGameServer(ctx context.Context, key string) erro
 
 	hc.loggerForGameServer(gs).Debug("Issue with GameServer pod, marking as GameServerStateUnhealthy")
 	gsCopy := gs.DeepCopy()
-	gsCopy.Status.State = agonesv1.GameServerStateUnhealthy
+	applyUnhealthyState(gsCopy)
 
 	if _, err := hc.gameServerGetter.GameServers(gs.ObjectMeta.Namespace).Update(ctx, gsCopy, metav1.UpdateOptions{}); err != nil {
 		return hc.errs.Wrapf(err, "error updating GameServer %s/%s to unhealthy", gs.ObjectMeta.Name, gs.ObjectMeta.Namespace)

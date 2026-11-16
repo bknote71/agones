@@ -179,7 +179,7 @@ func (c *MissingPodController) syncGameServer(ctx context.Context, key string) e
 	}
 
 	gsCopy := gs.DeepCopy()
-	gsCopy.Status.State = agonesv1.GameServerStateUnhealthy
+	applyUnhealthyState(gsCopy)
 	gs, err = c.gameServerGetter.GameServers(gsCopy.ObjectMeta.Namespace).Update(ctx, gsCopy, metav1.UpdateOptions{})
 	if err != nil {
 		return c.errs.Wrap(err, "error updating GameServer to Unhealthy")

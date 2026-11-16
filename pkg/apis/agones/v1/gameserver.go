@@ -151,6 +151,9 @@ const (
 	// GameServerErroredAtAnnotation is an annotation that records the timestamp the GameServer entered the
 	// error state. The timestamp is encoded in RFC3339 format.
 	GameServerErroredAtAnnotation = agones.GroupName + "/errored-at"
+	// GameServerUnhealthyBeforeReadyAtAnnotation is an annotation that records the timestamp the GameServer
+	// became Unhealthy, when it did so without ever having been Ready. The timestamp is encoded in RFC3339 format.
+	GameServerUnhealthyBeforeReadyAtAnnotation = agones.GroupName + "/unhealthy-before-ready-at"
 	// FinalizerName is the domain name and finalizer path used to manage garbage collection of the GameServer.
 	FinalizerName = agones.GroupName + "/controller"
 

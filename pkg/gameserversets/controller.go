@@ -89,6 +89,7 @@ type Controller struct {
 	workerqueue                    *workerqueue.WorkerQueue
 	recorder                       record.EventRecorder
 	stateCache                     *gameServerStateCache
+	unhealthyBackoff               *unhealthyBackoff
 	allocationController           *AllocationOverflowController
 	errs                           *errors.Errors
 	maxCreationParallelism         int
@@ -132,6 +133,7 @@ func NewController(
 		maxGameServerDeletionsPerBatch: maxGameServerDeletionsPerBatch,
 		maxPodPendingCount:             maxPodPendingCount,
 		stateCache:                     &gameServerStateCache{},
+		unhealthyBackoff:               newUnhealthyBackoff(unhealthyBackoffMax),
 	}
 
 	c.baseLogger = runtime.NewLoggerWithType(c)
@@ -157,6 +159,7 @@ func NewController(
 		},
 		DeleteFunc: func(gsSet any) {
 			c.stateCache.deleteGameServerSet(gsSet.(*agonesv1.GameServerSet))
+			c.unhealthyBackoff.deleteGameServerSet(gsSet.(*agonesv1.GameServerSet))
 		},
 	})
 
@@ -320,8 +323,15 @@ func (c *Controller) syncGameServerSet(ctx context.Context, key string) error {
 
 	list = c.stateCache.forGameServerSet(gsSet).reconcileWithUpdatedServerList(list)
 
+	now := time.Now()
+	unhealthyDelay := c.unhealthyBackoff.observe(gsSet, list, now)
+	if next, ok := nextUnhealthyDelayEnd(list, unhealthyDelay, now); ok {
+		// Nothing else triggers a sync when a kept GameServer is due to be replaced.
+		c.workerqueue.EnqueueAfter(gsSet, next)
+	}
+
 	numServersToAdd, toDelete, isPartial := computeReconciliationAction(gsSet.Spec.Scheduling, list, c.counter.Counts(),
-		int(gsSet.Spec.Replicas), c.maxGameServerCreationsPerBatch, c.maxGameServerDeletionsPerBatch, c.maxPodPendingCount, gsSet.Spec.Priorities)
+		int(gsSet.Spec.Replicas), c.maxGameServerCreationsPerBatch, c.maxGameServerDeletionsPerBatch, c.maxPodPendingCount, gsSet.Spec.Priorities, unhealthyDelay)
 
 	// GameserverSet is marked for deletion then don't add gameservers.
 	if !gsSet.DeletionTimestamp.IsZero() {
@@ -379,7 +389,7 @@ func (c *Controller) syncGameServerSet(ctx context.Context, key string) error {
 // the list of game servers that were found and target replica count.
 func computeReconciliationAction(strategy apis.SchedulingStrategy, list []*agonesv1.GameServer,
 	counts map[string]gameservers.NodeCount, targetReplicaCount int, maxCreations int, maxDeletions int,
-	maxPending int, priorities []agonesv1.Priority) (int, []*agonesv1.GameServer, bool) {
+	maxPending int, priorities []agonesv1.Priority, unhealthyDelay time.Duration) (int, []*agonesv1.GameServer, bool) {
 	var upCount int     // up == Ready or will become ready
 	var deleteCount int // number of gameservers to delete
 
@@ -460,7 +470,12 @@ func computeReconciliationAction(strategy apis.SchedulingStrategy, list []*agone
 			}
 
 		case agonesv1.GameServerStateUnhealthy:
-			scheduleDeletion(gs)
+			if unhealthyDelayRemaining(gs, unhealthyDelay, time.Now()) > 0 {
+				// Count it as up until the backoff delay has passed, so it is not recreated in a tight loop.
+				handleGameServerUp(gs)
+			} else {
+				scheduleDeletion(gs)
+			}
 		default:
 			// unrecognized state, assume it's up.
 			handleGameServerUp(gs)

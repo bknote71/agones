@@ -16,9 +16,11 @@ package gameservers
 
 import (
 	"net"
+	"time"
 
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	"agones.dev/agones/pkg/util/errors"
+	"agones.dev/agones/pkg/util/runtime"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,6 +48,17 @@ const (
 // and failed syncs still retry with backoff through the workerqueue.
 func newStateUpdateLimiter() *rate.Limiter {
 	return rate.NewLimiter(stateUpdateRate, stateUpdateBurst)
+}
+
+// applyUnhealthyState moves the GameServer to Unhealthy, recording when that happened if it was never Ready.
+func applyUnhealthyState(gs *agonesv1.GameServer) {
+	if runtime.FeatureEnabled(runtime.FeatureSidecarContainers) && gs.IsBeforeReady() {
+		if gs.ObjectMeta.Annotations == nil {
+			gs.ObjectMeta.Annotations = map[string]string{}
+		}
+		gs.ObjectMeta.Annotations[agonesv1.GameServerUnhealthyBeforeReadyAtAnnotation] = time.Now().Format(time.RFC3339)
+	}
+	gs.Status.State = agonesv1.GameServerStateUnhealthy
 }
 
 // isGameServerPod returns if this Pod is a Pod that comes from a GameServer
